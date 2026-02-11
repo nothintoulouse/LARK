@@ -58,10 +58,41 @@ class AudioFileRepository(context: Context) {
         }
     }
 
+    suspend fun markSegmenting(id: Long) {
+        dao.getById(id)?.let { file ->
+            dao.update(file.copy(state = FileState.SEGMENTING.name))
+        }
+    }
+
     suspend fun markError(id: Long) {
         dao.getById(id)?.let { file ->
             dao.update(file.copy(state = FileState.ERROR.name))
         }
+    }
+
+    /**
+     * Insert a completed segment produced by post-hoc segmentation.
+     * These already have a WAV file, so they go straight to COMPLETE.
+     */
+    suspend fun insertCompletedSegment(
+        filename: String,
+        wavPath: String,
+        opusPath: String,
+        durationMs: Long,
+        sizeBytes: Long,
+        sessionId: String?
+    ): Long {
+        val entity = AudioFileEntity(
+            filename = filename,
+            opusPath = opusPath,
+            wavPath = wavPath,
+            state = FileState.COMPLETE.name,
+            durationMs = durationMs,
+            sizeBytes = sizeBytes,
+            convertedAt = System.currentTimeMillis(),
+            sessionId = sessionId
+        )
+        return dao.insert(entity)
     }
 
     suspend fun delete(entity: AudioFileEntity) {

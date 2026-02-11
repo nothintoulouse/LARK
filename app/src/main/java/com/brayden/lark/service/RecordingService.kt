@@ -13,12 +13,11 @@ import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import com.brayden.lark.audio.AudioStreamProcessor
-import com.brayden.lark.audio.CompletedSegment
 import com.brayden.lark.audio.RawStreamLog
+import com.brayden.lark.audio.StreamingWavWriter
 import com.brayden.lark.ble.BleConnectionManager
 import com.brayden.lark.ble.ConnectionState
 import com.brayden.lark.data.model.RecordingState
-import com.brayden.lark.data.repository.AudioFileRepository
 import com.brayden.lark.util.FileUtils
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
@@ -36,9 +35,9 @@ class RecordingService : Service() {
         // Health checkpoint interval
         private const val HEALTH_CHECK_INTERVAL_MS = 30_000L  // 30 seconds
 
-        // Disk space thresholds
-        private const val DISK_WARNING_BYTES = 200L * 1024 * 1024  // 200 MB
-        private const val DISK_CRITICAL_BYTES = 50L * 1024 * 1024  // 50 MB
+        // Disk space thresholds (raised — inline WAV writes ~4.5x more than Opus alone)
+        private const val DISK_WARNING_BYTES = 500L * 1024 * 1024  // 500 MB
+        private const val DISK_CRITICAL_BYTES = 100L * 1024 * 1024 // 100 MB
 
         // Wake lock timeout: 8 hours + 1 minute safety margin
         private const val WAKE_LOCK_TIMEOUT_MS = 8L * 60 * 60 * 1000 + 60_000L
@@ -69,12 +68,11 @@ class RecordingService : Service() {
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    private lateinit var repository: AudioFileRepository
-
     lateinit var connectionManager: BleConnectionManager
         private set
     private var streamProcessor: AudioStreamProcessor? = null
     private var rawStreamLog: RawStreamLog? = null
+    private var streamingWavWriter: StreamingWavWriter? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     private var recordingStartTime: Long = 0
@@ -84,9 +82,6 @@ class RecordingService : Service() {
 
     // Track whether this was an auto-resumed session
     private var isAutoResumed: Boolean = false
-
-    // Deferred WAV conversion: collect segment IDs during recording, batch-enqueue on stop
-    private val pendingConversions = mutableListOf<Long>()
 
     // Timestamp of last received frame (for stale detection)
     private var lastFrameReceivedMs: Long = 0
@@ -118,7 +113,6 @@ class RecordingService : Service() {
     override fun onCreate() {
         super.onCreate()
         connectionManager = BleConnectionManager(this)
-        repository = AudioFileRepository(this)
         Log.d(TAG, "Service created")
     }
 
@@ -175,14 +169,15 @@ class RecordingService : Service() {
         // Re-open raw stream log in append mode
         rawStreamLog = RawStreamLog(sessionId, this)
 
-        // Create stream processor with the raw log
+        // Re-open streaming WAV writer in append mode (header will be patched on finalize)
+        val wavFile = java.io.File(FileUtils.getWavDir(this), "${sessionId}_session.wav")
+        streamingWavWriter = StreamingWavWriter(wavFile).also { it.open() }
+
+        // Create stream processor with inline WAV conversion
         streamProcessor = AudioStreamProcessor(
-            context = this,
-            sessionId = sessionId,
-            rawLog = rawStreamLog!!
-        ).also { processor ->
-            setupSegmentCallback(processor)
-        }
+            rawLog = rawStreamLog!!,
+            wavWriter = streamingWavWriter!!
+        )
 
         // Enable unlimited reconnection for the resumed session
         connectionManager.unlimitedReconnect = true
@@ -222,17 +217,18 @@ class RecordingService : Service() {
         // Generate session ID for grouping segments
         sessionId = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
 
-        // Create raw stream log (safety net)
+        // Create raw stream log (safety net for crash recovery)
         rawStreamLog = RawStreamLog(sessionId, this)
 
-        // Set up audio pipeline with VAD-based segmentation + dual-write
+        // Create streaming WAV writer (inline Opus→PCM→WAV conversion)
+        val wavFile = java.io.File(FileUtils.getWavDir(this), "${sessionId}_session.wav")
+        streamingWavWriter = StreamingWavWriter(wavFile).also { it.open() }
+
+        // Set up audio pipeline: decode once, write to WAV + feed VAD for UI
         streamProcessor = AudioStreamProcessor(
-            context = this,
-            sessionId = sessionId,
-            rawLog = rawStreamLog!!
-        ).also { processor ->
-            setupSegmentCallback(processor)
-        }
+            rawLog = rawStreamLog!!,
+            wavWriter = streamingWavWriter!!
+        )
 
         // Persist session for crash recovery
         val session = RecordingSession(
@@ -262,34 +258,6 @@ class RecordingService : Service() {
         _recordingState.value = RecordingState.CONNECTING
         recordingStartTime = System.currentTimeMillis()
         Log.d(TAG, "Recording started, session: $sessionId")
-    }
-
-    private fun setupSegmentCallback(processor: AudioStreamProcessor) {
-        processor.setSegmentCallback(object : AudioStreamProcessor.SegmentCallback {
-            override fun onSegmentCompleted(segment: CompletedSegment) {
-                // Insert each segment to DB; defer WAV conversion until stop
-                serviceScope.launch(Dispatchers.IO) {
-                    try {
-                        val fileId = repository.insertRecording(
-                            filename = segment.filename,
-                            opusPath = segment.file.absolutePath,
-                            durationMs = segment.durationMs,
-                            sizeBytes = segment.sizeBytes,
-                            sessionId = segment.sessionId
-                        )
-                        // Defer WAV conversion — will batch-enqueue on stop
-                        synchronized(pendingConversions) {
-                            pendingConversions.add(fileId)
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to insert segment to DB (non-fatal): ${e.message}")
-                        // Raw log still has the data — not lost
-                    }
-                }
-                _segmentCount.postValue(segment.segmentIndex + 1)
-                Log.d(TAG, "Segment completed: ${segment.filename} (${segment.durationMs}ms)")
-            }
-        })
     }
 
     private fun startAudioCollection() {
@@ -382,7 +350,7 @@ class RecordingService : Service() {
                 sessionId = sessionId,
                 deviceAddress = connectionManager.connectionState.value.let { "" }, // Address already saved
                 startedAtMs = recordingStartTime,
-                segmentCount = processor.totalSegments,
+                segmentCount = 0, // Segments are created post-hoc, not during recording
                 totalFrames = processor.totalFrames,
                 rawLogPath = rawStreamLog?.getFile()?.absolutePath ?: "",
                 isActive = true
@@ -419,9 +387,14 @@ class RecordingService : Service() {
         // Disable unlimited reconnect so disconnect is clean
         connectionManager.unlimitedReconnect = false
 
-        // Finalize audio — force-ends any active segment
+        // Capture paths before finalizing (finalizeRecording closes the files)
+        val wavPath = streamProcessor?.getSessionWavPath() ?: ""
+        val rawLogPath = rawStreamLog?.getFile()?.absolutePath ?: ""
+
+        // Finalize audio — closes raw log and patches WAV header
         streamProcessor?.finalizeRecording()
         streamProcessor = null
+        streamingWavWriter = null
 
         // Disconnect BLE
         connectionManager.disconnect()
@@ -435,17 +408,10 @@ class RecordingService : Service() {
         // Clear persisted session
         RecordingSession.clear(this)
 
-        // Batch-enqueue deferred WAV conversions
-        val conversions: List<Long>
-        synchronized(pendingConversions) {
-            conversions = pendingConversions.toList()
-            pendingConversions.clear()
-        }
-        if (conversions.isNotEmpty()) {
-            Log.d(TAG, "Enqueuing ${conversions.size} deferred WAV conversions")
-            for (fileId in conversions) {
-                WavConversionWorker.enqueue(this, fileId)
-            }
+        // Enqueue post-hoc segmentation (replaces old batch WAV conversion)
+        if (sessionId.isNotEmpty() && wavPath.isNotEmpty()) {
+            Log.d(TAG, "Enqueuing post-hoc segmentation for session $sessionId")
+            SegmentationWorker.enqueue(this, sessionId, wavPath, rawLogPath)
         }
 
         _recordingState.value = RecordingState.IDLE
