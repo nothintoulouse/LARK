@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#FF1B6B</color>
+    <color name="primary_container">#FFD9E2</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="secondary">#006D40</color>
+    <color name="secondary_container">#95F7B7</color>
+    <color name="on_secondary">#FFFFFF</color>
+    <color name="error">#BA1A1A</color>
+    <color name="surface">#FFFBFE</color>
+    <color name="on_surface">#1C1B1F</color>
+    <color name="surface_variant">#F3EDF7</color>
+
+    <!-- Status colors -->
+    <color name="status_connected">#4CAF50</color>
+    <color name="status_disconnected">#F44336</color>
+    <color name="status_recording">#FF1B6B</color>
+    <color name="status_idle">#9E9E9E</color>
+
+    <!-- Telemetry colors -->
+    <color name="warning_orange">#FF9800</color>
+    <color name="confidence_speech">#4CAF50</color>
+    <color name="confidence_ambiguous">#FFC107</color>
+    <color name="confidence_silence">#9E9E9E</color>
+</resources>

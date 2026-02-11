@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LARK</string>
+
+    <!-- Main -->
+    <string name="scan_for_devices">Scan for Devices</string>
+    <string name="stop_scan">Stop Scan</string>
+    <string name="scanning">Scanning…</string>
+    <string name="no_devices_found">No devices found</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="connecting">Connecting…</string>
+
+    <!-- Recording -->
+    <string name="start_recording">Start Recording</string>
+    <string name="stop_recording">Stop Recording</string>
+    <string name="recording">Recording</string>
+    <string name="recording_duration">Duration: %s</string>
+    <string name="packets_received">Packets: %d</string>
+    <string name="battery_level">Battery: %d%%</string>
+
+    <!-- Files -->
+    <string name="files">Files</string>
+    <string name="no_files">No recordings yet</string>
+    <string name="delete">Delete</string>
+    <string name="share">Share</string>
+    <string name="convert_to_wav">Convert to WAV</string>
+    <string name="converting">Converting…</string>
+    <string name="conversion_complete">Conversion complete</string>
+
+    <!-- Notifications -->
+    <string name="recording_channel_name">Recording</string>
+    <string name="recording_channel_desc">Shows when audio is being recorded</string>
+    <string name="notification_recording_title">LARK Recording</string>
+    <string name="notification_recording_text">Recording audio from Omi device</string>
+
+    <!-- Player -->
+    <string name="segments">Segments</string>
+    <string name="play_pause">Play/Pause</string>
+
+    <!-- Recording Telemetry -->
+    <string name="auto_resumed">Auto-Resumed</string>
+    <string name="vad_silence">Silence</string>
+    <string name="vad_speech">Speech detected</string>
+    <string name="vad_ambiguous">Listening…</string>
+    <string name="stat_packets">Packets</string>
+    <string name="stat_battery">Battery</string>
+    <string name="stat_segments">Segments</string>
+
+    <!-- Errors -->
+    <string name="error_bluetooth_not_available">Bluetooth is not available on this device</string>
+    <string name="error_bluetooth_disabled">Please enable Bluetooth</string>
+    <string name="error_permissions_required">Bluetooth permissions are required</string>
+    <string name="error_device_not_found">Omi device not found</string>
+    <string name="error_connection_failed">Connection failed</string>
+    <string name="error_storage_full">Storage is full</string>
+</resources>
