@@ -1,210 +1,153 @@
-# LARK 🎤
-**Local Audio Recording Kit for Omi DevKit 2**
+# LARK
 
-A sophisticated Android BLE audio recorder that connects to Omi DevKit 2 wearable devices, featuring intelligent voice activity detection and automatic conversation segmentation.
+**Local Audio Recording Kit** — an Android BLE recorder for the Omi DevKit 2 wearable that streams Opus audio over Bluetooth Low Energy, decodes it on-device, and splits it into per-conversation files using a voice activity detector.
 
-## ✨ Features
+Everything stays on the phone. No cloud, no account, no upload.
 
-### Core Functionality
-- 🔵 **BLE Audio Streaming** - Connects to Omi DevKit 2 via Bluetooth Low Energy
-- 🎙️ **Opus Recording** - Captures high-quality Opus-encoded audio (16kHz mono)
-- 💾 **Local Storage** - Saves all audio locally with no cloud dependency
-- 🔄 **WAV Conversion** - Automatic background conversion to WAV format
+## Status
 
-### Advanced Features
-- 🎯 **Voice Activity Detection** - Multi-feature spectral analysis (RMS, ZCR, spectral centroid, band energy ratio, spectral flux)
-- 📊 **Automatic Segmentation** - Separate files for each conversation
-- 🛡️ **Dual-Write Safety** - Raw log backup for crash recovery
-- 🔋 **Battery Optimized** - Wake lock management and efficient processing
-- 📱 **Auto-Resume** - Recovers from app crashes during long recordings
+Built and run on real hardware (Omi DevKit 2 + Android phone). BLE connection, Opus streaming, decoding, VAD-driven segmentation, crash recovery, and WAV conversion all work on-device.
 
-## 🏗️ Architecture
+What is **not** substantiated, and is called out again in [Limitations](#limitations): there is no automated test suite in this repository, and the long-duration and battery claims below come from ordinary use rather than instrumented measurement.
+
+## How it works
 
 ```
-BLE Stream → Packet Reassembly → Raw Log (safety)
+BLE Stream → Packet Reassembly → Raw Log (crash-safety backup)
                                      ↓
                               Opus Decoder
                                      ↓
                          Voice Activity Detector
-                            (6-feature analysis)
+                            (6-feature scorer)
                                      ↓
                             Segment Manager
-                         (conversation files)
+                         (one file per conversation)
                                      ↓
-                              Database
+                            Room Database
                                      ↓
-                          WorkManager (idle)
+                       WorkManager (deferred, on idle)
                                      ↓
-                           WAV Converter
+                            WAV Converter
 ```
 
-## 📱 Requirements
+Two design decisions drive the rest:
 
-- **Android:** 6.0 (API 23) or higher
-- **Device:** Omi DevKit 2 wearable
-- **Permissions:** Bluetooth, Location (for BLE scanning), Storage, Foreground Service
+**Every byte is written twice.** The reassembled BLE stream goes to a raw append-only log *before* any decoding or segmentation happens. If the app crashes mid-recording — or the VAD makes a bad call — the raw log still holds the complete session. Segmentation is a derived view, never the only copy.
 
-## 🚀 Getting Started
+**Decoding and conversion are decoupled from capture.** Capture runs in a foreground service and does the minimum work needed to keep up with the BLE stream. WAV conversion is handed to WorkManager and runs when the device is idle, so a 4.5x file-size expansion never competes with live recording.
 
-### Installation
+## Voice activity detection
 
-1. Clone the repository
+The interesting part of the project. Rather than a single energy gate — which fires on door slams and misses quiet speech — the detector computes six features per frame and combines them into a weighted confidence score in `[0,1]`:
+
+| Feature | Weight | What it contributes |
+|---|---|---|
+| Band energy ratio (300–3000 Hz) | 0.25 | Fraction of energy in the speech band |
+| Spectral centroid | 0.20 | Speech sits roughly 600–1800 Hz |
+| RMS energy | 0.15 | Basic loudness |
+| Zero-crossing rate | 0.15 | Separates voiced speech from hiss |
+| Low-band dominance | 0.15 | Rejects rumble, handling noise, wind |
+| Spectral flux | 0.10 | Rejects transients (taps, clicks) |
+
+Two details matter more than the feature list:
+
+- **Hysteresis.** Onset requires a score above `0.52`, but silence requires it to drop below `0.30`. A single threshold makes the detector chatter across the boundary and shred a conversation into fragments; the gap holds a segment open through natural pauses.
+- **A fast reject path.** Frames under an RMS floor are classified as silence immediately, skipping further analysis. Most frames in a long recording are silence, so this dominates the CPU and battery profile.
+
+All weights and thresholds live in a single `VadConfig` data class (`audio/VoiceActivityDetector.kt`) — they are tuned defaults, not magic numbers scattered through the code.
+
+Segmentation policy: 3 s silence closes a segment, 500 ms minimum speech to open one, and a 300 ms pre-speech buffer so segments don't clip the first syllable.
+
+## Requirements
+
+- Android 6.0 (API 23) or higher
+- An Omi DevKit 2 wearable
+- Permissions: Bluetooth, Location (Android requires it for BLE scanning), Storage, Foreground Service
+- A physical device — BLE does not work in the emulator
+
+## Build
+
 ```bash
-git clone https://github.com/yourusername/LARK.git
+git clone https://github.com/nothintoulouse/LARK.git
 cd LARK
+./gradlew assembleDebug
 ```
 
-2. Open in Android Studio
-3. Build and run on physical device (BLE required)
+Or open in Android Studio and run on a connected device.
 
-### Usage
+## Usage
 
-1. **Scan** - Find your Omi DevKit 2
-2. **Connect** - Tap to connect and start recording
-3. **Record** - App automatically segments conversations
-4. **Stop** - Tap stop when finished
-5. **Files** - View, share, or play recordings
+1. **Scan** — find the Omi DevKit 2
+2. **Connect** — tap to connect; recording starts
+3. **Record** — segments are cut automatically as you talk
+4. **Stop** — ends the session
+5. **Files** — play, share, or export recordings
 
-## 🎓 Technical Details
+## Output
 
-### Voice Activity Detection
-
-The VAD system uses sophisticated multi-feature analysis:
-
-- **RMS Energy** - Basic loudness gating
-- **Zero-Crossing Rate** - Distinguishes speech from noise
-- **Spectral Centroid** - Frequency distribution analysis
-- **Band Energy Ratio** - Speech band (300-3000 Hz) focus
-- **Spectral Flux** - Transient detection
-- **Low-Band Dominance** - Filters rumble and wind
-
-**Configuration:**
-- Speech onset threshold: 0.52
-- Silence timeout: 3 seconds
-- Min speech duration: 500ms
-- Pre-speech buffer: 300ms
-
-### File Format
-
-**Recording Output:**
 ```
-session_seg001.opus   (Opus compressed, ~4.1 MB/10 min)
+session_seg001.opus     Opus, 16 kHz mono
 session_seg002.opus
-session_seg003.opus
-session_raw.opus_raw  (Safety backup)
+session_raw.opus_raw    Complete session, crash-safety backup
 ```
 
-**Converted:**
-```
-session_seg001.wav    (PCM 16kHz mono, ~18 MB/10 min)
-session_seg002.wav
-session_seg003.wav
-```
+WAV conversion produces 16 kHz mono PCM alongside the Opus files.
 
-### Storage Estimates
+| Duration | Opus | WAV |
+|---|---|---|
+| 10 min | ~4.1 MB | ~18 MB |
+| 1 hour | ~24.5 MB | ~110 MB |
+| 8 hours | ~196 MB | ~880 MB |
 
-| Duration | Opus Size | WAV Size | Ratio |
-|----------|-----------|----------|-------|
-| 10 min   | 4.1 MB    | 18 MB    | 4.4x  |
-| 1 hour   | 24.5 MB   | 110 MB   | 4.5x  |
-| 8 hours  | 196 MB    | 880 MB   | 4.5x  |
+These are computed from the bitrates, not measured across a full 8-hour session.
 
-## 🏗️ Project Structure
+## Project layout
 
 ```
 app/src/main/java/com/brayden/lark/
-├── audio/                    Audio processing pipeline
-│   ├── VoiceActivityDetector.kt    (596 lines - DSP core)
-│   ├── SegmentManager.kt           (165 lines - file management)
-│   ├── RawStreamLog.kt             (136 lines - safety backup)
-│   ├── AudioStreamProcessor.kt     (Main coordinator)
-│   ├── OpusFileWriter.kt
-│   ├── PacketReassembler.kt
-│   └── WavConverter.kt
-├── ble/                      Bluetooth Low Energy
-│   ├── BleConnectionManager.kt
-│   ├── BleScanner.kt
-│   └── BleConstants.kt
-├── service/                  Background services
-│   ├── RecordingService.kt         (502 lines - main service)
-│   └── WavConversionWorker.kt
-├── data/                     Database & models
-│   ├── local/
-│   └── repository/
-└── ui/                       User interface
-    ├── main/
-    ├── recording/
-    └── files/
+├── audio/      VoiceActivityDetector, SegmentManager, RawStreamLog,
+│               AudioStreamProcessor, OpusFileWriter, PacketReassembler,
+│               WavConverter
+├── ble/        BleConnectionManager, BleScanner, BleConstants
+├── service/    RecordingService (foreground), WavConversionWorker
+├── data/       Room database, entities, repository
+└── ui/         main / recording / files screens
 ```
 
-## 📦 Dependencies
+About 4,400 lines of Kotlin across 30 files.
 
-- **AndroidX** - Core, AppCompat, Lifecycle, Room, WorkManager
-- **Material Design 3** - Modern UI components
-- **Concentus** - Pure Java Opus decoder
-- **Kotlin Coroutines** - Async processing
+## Limitations
 
-## 🔬 Testing
+Stated plainly, because an earlier version of this README implied test coverage that does not exist:
 
-### Unit Tests
-```bash
-./gradlew test
-```
+- **No automated tests.** `app/src/` contains only `main` — there is no `test` or `androidTest` source set. JUnit and Espresso are declared in `build.gradle.kts` as scaffolding, but no test has been written. `./gradlew test` will run zero tests.
+- **Battery drain has not been profiled.** The fast-reject path is designed to reduce it; that has not been measured.
+- **Very long silences (>1 hour) are untested.**
+- **Periodic noise-floor recalibration has not been field-tested** across changing acoustic environments.
+- **Single device only.** No multi-device or concurrent-connection support.
+- **Hardware-locked.** The BLE service and characteristic UUIDs target the Omi DevKit 2 specifically.
 
-### Instrumentation Tests
-```bash
-./gradlew connectedAndroidTest
-```
+## Privacy
 
-### Long Recording Test
-1. Connect Omi DevKit 2
-2. Start 8+ hour recording
-3. Verify segments created
-4. Check raw log integrity
-5. Validate WAV conversion
+LARK records audio continuously while connected and stores it in the app's local storage. It makes no network requests and has no analytics, telemetry, or cloud dependency — audio never leaves the device unless you explicitly share a file.
 
-## 🐛 Known Issues
+That also means **you** are responsible for the legal side. Recording conversations without the consent of the participants is illegal in many jurisdictions, including several US states requiring all-party consent. This is a personal recording tool; use it accordingly.
 
-- [ ] Periodic noise floor recalibration needs field testing
-- [ ] Very long silence periods (>1 hour) untested
-- [ ] Battery drain profiling incomplete
+## How this was built
 
-## 🗺️ Roadmap
+I designed the audio pipeline and the VAD feature set and thresholds, and validated behavior against real hardware. Coding agents assisted with implementation and Android boilerplate. The tuning decisions — hysteresis over a single threshold, dual-write safety, deferring WAV conversion to idle — came from watching the recorder fail in specific ways and correcting for them.
 
-### v1.0 (Current)
-- ✅ Core BLE recording
-- ✅ Voice activity detection
-- ✅ Automatic segmentation
-- ✅ Crash recovery
-- 🔲 Complete testing suite
-- 🔲 8-hour stress test validation
+## License
 
-### v1.1 (Planned)
-- Settings UI (VAD tuning)
-- Recording history/calendar view
-- Export to cloud services
-- Advanced file management
+MIT — see [LICENSE](LICENSE).
 
-### v2.0 (Future)
-- Multi-device support
-- Speaker diarization hints
-- Real-time transcription (offline)
-- Noise profile customization
+Third-party components, all under permissive licenses:
 
-## 📄 License
+- **Concentus** (`io.github.jaredmdobson:concentus`) — pure-Java Opus decoder, BSD-style Opus license
+- **AndroidX** (Core, AppCompat, Lifecycle, Room, WorkManager) — Apache License 2.0
+- **Material Components for Android** — Apache License 2.0
+- **Kotlin Coroutines** — Apache License 2.0
 
-[Add your license here]
+## Acknowledgments
 
-## 🙏 Acknowledgments
-
-- Omi DevKit 2 firmware team for BLE protocol
-- Concentus library for pure-Java Opus decoding
-- Android community for best practices
-
-## 📧 Contact
-
-[Your contact information]
-
----
-
-**Built with ❤️ for privacy-focused audio recording**
+Omi DevKit 2 firmware team for the BLE audio protocol.
